@@ -1346,17 +1346,16 @@ function enforcePriorityShareCap_(allocationMap, betAllocationMap, allUrls, prio
     return;
   }
   var cap = targetShare != null ? Math.max(0, Math.min(1, targetShare)) : 0;
+  var EPSILON = 1e-9;
   var priorityItems = [];
   var totalShare = 0;
   var floorTotal = 0;
+  var flexibleTotal = 0;
   allUrls.forEach(function (row) {
     if (!priorityKeys[row.key]) {
       return;
     }
     var current = Math.max(0, allocationMap[row.key] || 0);
-    if (current <= 0) {
-      return;
-    }
     var floor = 0;
     if (fixedMinimumMap && fixedMinimumMap[row.key] != null) {
       floor = Math.max(0, fixedMinimumMap[row.key] || 0);
@@ -1365,109 +1364,218 @@ function enforcePriorityShareCap_(allocationMap, betAllocationMap, allUrls, prio
       }
     }
     var flexible = Math.max(0, current - floor);
+    var weight = Math.max(0, row.distributionWeight || row.performanceScore || 0);
     priorityItems.push({
       key: row.key,
       row: row,
       current: current,
       floor: floor,
-      flexible: flexible
+      flexible: flexible,
+      weight: weight,
+      initial: current
     });
     totalShare += current;
     floorTotal += floor;
+    flexibleTotal += flexible;
   });
   if (!priorityItems.length) {
     return;
   }
-  var EPSILON = 1e-9;
-  if (totalShare <= cap + EPSILON) {
-    return;
-  }
-  var flexibleTotal = Math.max(0, totalShare - floorTotal);
-  if (flexibleTotal <= EPSILON) {
-    return;
-  }
-  var desiredFlexible = Math.max(0, cap - floorTotal);
-  if (desiredFlexible >= flexibleTotal - EPSILON) {
-    return;
-  }
-  var scale = desiredFlexible > 0 ? (desiredFlexible / flexibleTotal) : 0;
-  if (!isFinite(scale) || scale < 0) {
-    scale = 0;
-  }
+
   var totalReduction = 0;
-  priorityItems.forEach(function (item) {
-    var newFlexible = item.flexible * scale;
-    var nextShare = item.floor + newFlexible;
-    if (nextShare < item.floor) {
-      nextShare = item.floor;
+  if (totalShare > cap + EPSILON) {
+    var desiredFlexible = Math.max(0, cap - floorTotal);
+    if (desiredFlexible < 0) {
+      desiredFlexible = 0;
     }
-    var reduction = item.current - nextShare;
-    if (reduction < 0) {
-      reduction = 0;
+    if (desiredFlexible > flexibleTotal) {
+      desiredFlexible = flexibleTotal;
     }
-    totalReduction += reduction;
-    allocationMap[item.key] = nextShare;
-    if (betAllocationMap && betAllocationMap[item.key]) {
-      var betShare = betAllocationMap[item.key];
-      if (item.current > 0) {
-        betShare = betShare * (nextShare / item.current);
-      }
-      if (betShare > nextShare) {
-        betShare = nextShare;
-      }
-      betAllocationMap[item.key] = betShare;
+    var scale = flexibleTotal > EPSILON ? (desiredFlexible / flexibleTotal) : 0;
+    if (!isFinite(scale) || scale < 0) {
+      scale = 0;
     }
-    item.reduction = reduction;
-  });
-  if (totalReduction <= EPSILON) {
-    return;
-  }
-  options = options || {};
-  var allowAll = !!options.guaranteeAll;
-  var activeKeys = options.activeKeys || {};
-  var betKeys = options.betKeys || {};
-  var recipients = [];
-  var weightSum = 0;
-  allUrls.forEach(function (row) {
-    if (priorityKeys[row.key]) {
-      return;
-    }
-    var eligible = allowAll || !!activeKeys[row.key] || !!betKeys[row.key] || (allocationMap[row.key] || 0) > 0;
-    if (!eligible) {
-      return;
-    }
-    var weight = Math.max(0, row.distributionWeight || row.performanceScore || 0);
-    recipients.push({ key: row.key, weight: weight });
-    weightSum += weight;
-  });
-  if (!recipients.length) {
     priorityItems.forEach(function (item) {
-      allocationMap[item.key] = item.current;
+      var newFlexible = item.flexible * scale;
+      var nextShare = item.floor + newFlexible;
+      if (nextShare < item.floor) {
+        nextShare = item.floor;
+      }
+      var reduction = item.current - nextShare;
+      if (reduction < 0) {
+        reduction = 0;
+      }
+      totalReduction += reduction;
+      allocationMap[item.key] = nextShare;
       if (betAllocationMap && betAllocationMap[item.key]) {
         var betShare = betAllocationMap[item.key];
-        if (betShare > item.current) {
-          betShare = item.current;
+        if (item.current > 0) {
+          betShare = betShare * (nextShare / item.current);
+        }
+        if (betShare > nextShare) {
+          betShare = nextShare;
         }
         betAllocationMap[item.key] = betShare;
       }
+      item.current = nextShare;
     });
-    return;
   }
-  var distributed = 0;
-  recipients.forEach(function (recipient, index) {
-    var portion;
-    if (weightSum > EPSILON) {
-      portion = totalReduction * (recipient.weight / weightSum);
+
+  options = options || {};
+  if (totalReduction > EPSILON) {
+    var allowAll = !!options.guaranteeAll;
+    var activeKeys = options.activeKeys || {};
+    var betKeys = options.betKeys || {};
+    var recipients = [];
+    var weightSum = 0;
+    allUrls.forEach(function (row) {
+      if (priorityKeys[row.key]) {
+        return;
+      }
+      var eligible = allowAll || !!activeKeys[row.key] || !!betKeys[row.key] || (allocationMap[row.key] || 0) > 0;
+      if (!eligible) {
+        return;
+      }
+      var weight = Math.max(0, row.distributionWeight || row.performanceScore || 0);
+      recipients.push({ key: row.key, weight: weight });
+      weightSum += weight;
+    });
+    if (!recipients.length) {
+      priorityItems.forEach(function (item) {
+        allocationMap[item.key] = item.initial;
+        if (betAllocationMap && betAllocationMap[item.key]) {
+          var betShare = betAllocationMap[item.key];
+          if (betShare > item.initial) {
+            betShare = item.initial;
+          }
+          betAllocationMap[item.key] = betShare;
+        }
+        item.current = item.initial;
+      });
+      totalReduction = 0;
     } else {
-      portion = totalReduction / recipients.length;
+      var distributed = 0;
+      recipients.forEach(function (recipient, index) {
+        var portion;
+        if (weightSum > EPSILON) {
+          portion = totalReduction * (recipient.weight / weightSum);
+        } else {
+          portion = totalReduction / recipients.length;
+        }
+        if (index === recipients.length - 1) {
+          portion = totalReduction - distributed;
+        } else {
+          distributed += portion;
+        }
+        allocationMap[recipient.key] = (allocationMap[recipient.key] || 0) + portion;
+      });
     }
-    if (index === recipients.length - 1) {
-      portion = totalReduction - distributed;
-    } else {
-      distributed += portion;
-    }
-    allocationMap[recipient.key] = (allocationMap[recipient.key] || 0) + portion;
+  }
+
+  var updatedTotal = 0;
+  priorityItems.forEach(function (item) {
+    item.current = Math.max(0, allocationMap[item.key] || 0);
+    updatedTotal += item.current;
   });
+
+  if (cap > updatedTotal + EPSILON) {
+    var donorItems = [];
+    var donorTotal = 0;
+    allUrls.forEach(function (row) {
+      if (priorityKeys[row.key]) {
+        return;
+      }
+      var current = Math.max(0, allocationMap[row.key] || 0);
+      if (current <= 0) {
+        return;
+      }
+      var floor = 0;
+      if (fixedMinimumMap && fixedMinimumMap[row.key] != null) {
+        floor = Math.max(0, fixedMinimumMap[row.key] || 0);
+        if (floor > current) {
+          floor = current;
+        }
+      }
+      var available = Math.max(0, current - floor);
+      if (available <= EPSILON) {
+        return;
+      }
+      donorItems.push({
+        key: row.key,
+        current: current,
+        floor: floor,
+        available: available
+      });
+      donorTotal += available;
+    });
+
+    var potential = Math.min(cap, updatedTotal + donorTotal);
+    var needed = Math.max(0, potential - updatedTotal);
+    if (needed > EPSILON && donorTotal > EPSILON) {
+      var totalIncrease = 0;
+      var donorDistributed = 0;
+      donorItems.forEach(function (item, index) {
+        var reduction = needed * (item.available / donorTotal);
+        if (reduction > item.available) {
+          reduction = item.available;
+        }
+        if (index === donorItems.length - 1) {
+          var remaining = needed - donorDistributed;
+          if (remaining < 0) {
+            remaining = 0;
+          }
+          reduction = Math.min(item.available, remaining);
+        } else {
+          donorDistributed += reduction;
+        }
+        if (reduction < 0) {
+          reduction = 0;
+        }
+        var nextShare = Math.max(item.floor, item.current - reduction);
+        if (nextShare < item.floor) {
+          nextShare = item.floor;
+        }
+        totalIncrease += item.current - nextShare;
+        allocationMap[item.key] = nextShare;
+        if (betAllocationMap && betAllocationMap[item.key]) {
+          var betShare = betAllocationMap[item.key];
+          if (betShare > nextShare) {
+            betShare = nextShare;
+          } else if (item.current > 0) {
+            betShare = betShare * (nextShare / item.current);
+          }
+          betAllocationMap[item.key] = betShare;
+        }
+      });
+
+      if (totalIncrease > EPSILON) {
+        var weightSum = 0;
+        priorityItems.forEach(function (item) {
+          weightSum += item.weight;
+        });
+        var added = 0;
+        priorityItems.forEach(function (item, index) {
+          var addition;
+          if (weightSum > EPSILON) {
+            addition = totalIncrease * (item.weight / weightSum);
+          } else {
+            addition = totalIncrease / priorityItems.length;
+          }
+          if (index === priorityItems.length - 1) {
+            addition = totalIncrease - added;
+          } else {
+            added += addition;
+          }
+          if (addition < 0) {
+            addition = 0;
+          }
+          var nextShare = (allocationMap[item.key] || 0) + addition;
+          allocationMap[item.key] = nextShare;
+          item.current = nextShare;
+        });
+      }
+    }
+  }
 }
 
 function normalizeAllocationWithMinimums_(allocationMap, betAllocationMap, minimumMap) {
