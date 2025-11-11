@@ -2125,7 +2125,11 @@ function buildDistributionPlan_(rows, hoursInfo, revshareMap, params) {
 
   var siteTargetShareMap = computeSiteTargetShareMap_(siteRows, allUrls, allocationMap);
   if (siteTargetShareMap) {
-    rebalanceAllocationMapBySiteTargets_(allocationMap, betAllocationMap, allUrls, siteTargetShareMap);
+    rebalanceAllocationMapBySiteTargets_(allocationMap, betAllocationMap, allUrls, siteTargetShareMap, {
+      activeKeys: activeKeys,
+      betKeys: betTargetKeys,
+      guaranteeAll: guaranteeAll
+    });
     siteRows.forEach(function (siteRow) {
       siteRow.targetShare = siteTargetShareMap.hasOwnProperty(siteRow.site) ? siteTargetShareMap[siteRow.site] : 0;
     });
@@ -3496,10 +3500,14 @@ function computeSiteTargetShareMap_(siteRows, allUrls, allocationMap) {
   return targetShares;
 }
 
-function rebalanceAllocationMapBySiteTargets_(allocationMap, betAllocationMap, allUrls, targetShares) {
+function rebalanceAllocationMapBySiteTargets_(allocationMap, betAllocationMap, allUrls, targetShares, options) {
   if (!targetShares) {
     return;
   }
+  options = options || {};
+  var allowAll = !!options.guaranteeAll;
+  var activeKeys = options.activeKeys || {};
+  var betKeys = options.betKeys || {};
   var urlsBySite = {};
   allUrls.forEach(function (row) {
     if (!urlsBySite[row.site]) {
@@ -3520,7 +3528,8 @@ function rebalanceAllocationMapBySiteTargets_(allocationMap, betAllocationMap, a
       var key = row.key;
       var current = Math.max(0, allocationMap[key] || 0);
       var floor = Math.max(0, row.fixedMinimumShare || 0);
-      var flexible = Math.max(0, current - floor);
+      var eligibleFlexible = allowAll || !!activeKeys[key] || !!betKeys[key];
+      var flexible = eligibleFlexible ? Math.max(0, current - floor) : 0;
       siteFloor += floor;
       siteFlexible += flexible;
       return {
@@ -3528,7 +3537,8 @@ function rebalanceAllocationMapBySiteTargets_(allocationMap, betAllocationMap, a
         key: key,
         floor: floor,
         current: current,
-        flexible: flexible
+        flexible: flexible,
+        eligibleFlexible: eligibleFlexible
       };
     });
 
@@ -3540,33 +3550,43 @@ function rebalanceAllocationMapBySiteTargets_(allocationMap, betAllocationMap, a
     var weightSum = 0;
     if (siteFlexible <= 0 && targetFlexible > 0) {
       items.forEach(function (item) {
+        if (!item.eligibleFlexible) {
+          item.weight = 0;
+          return;
+        }
         var weight = Math.max(0, item.row.distributionWeight || item.row.performanceScore || 0);
         item.weight = weight;
         weightSum += weight;
       });
     }
 
+    var eligibleItems = items.filter(function (item) { return item.eligibleFlexible; });
+
     items.forEach(function (item, index) {
       var newShare;
       if (siteFlexible > 0) {
-        var scale = targetFlexible / siteFlexible;
+        var scale = siteFlexible > 0 ? targetFlexible / siteFlexible : 0;
         var adjusted = item.flexible * scale;
         newShare = item.floor + adjusted;
       } else if (targetFlexible > 0) {
-        var weightPortion;
-        if (weightSum > 0) {
-          weightPortion = targetFlexible * (item.weight / weightSum);
+        if (item.eligibleFlexible && eligibleItems.length) {
+          var weightPortion;
+          if (weightSum > 0) {
+            weightPortion = targetFlexible * (item.weight / weightSum);
+          } else {
+            weightPortion = targetFlexible / eligibleItems.length;
+          }
+          if (index === items.length - 1) {
+            var assigned = 0;
+            items.slice(0, index).forEach(function (prev) {
+              assigned += Math.max(0, prev.nextShare != null ? prev.nextShare - prev.floor : 0);
+            });
+            weightPortion = Math.max(0, targetFlexible - assigned);
+          }
+          newShare = item.floor + weightPortion;
         } else {
-          weightPortion = targetFlexible / items.length;
+          newShare = item.floor;
         }
-        if (index === items.length - 1) {
-          var assigned = 0;
-          items.slice(0, index).forEach(function (prev) {
-            assigned += Math.max(0, prev.nextShare != null ? prev.nextShare - prev.floor : 0);
-          });
-          weightPortion = Math.max(0, targetFlexible - assigned);
-        }
-        newShare = item.floor + weightPortion;
       } else {
         newShare = item.floor;
       }
