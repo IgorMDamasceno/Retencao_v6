@@ -21,6 +21,7 @@ const DISTRIBUTION_COVERAGE_BONUS = 0.25;
 const DISTRIBUTION_SCORE_EXPONENT = 0.5;
 const DISTRIBUTION_ECPM_EXPONENT = 1.0;
 const DISTRIBUTION_RPS_EXPONENT = 2.5;
+const DISTRIBUTION_RPS_BONUS = 0.35; // Ajuste rápido para amplificar a influência do RPS (0 mantém o comportamento anterior)
 const DISTRIBUTION_SOFTMAX_TAU = 0.4;
 const LINK_ROUTER_AUTO_SYNC_CROSS_DAY_WINDOW_HOURS = 4;
 
@@ -3352,6 +3353,15 @@ function computeDistributionCompositeScore_(scoreNorm, ecpmNorm, rpsNorm) {
   var scoreComponent = Math.pow(Math.max(scoreNorm || 0, 0), DISTRIBUTION_SCORE_EXPONENT);
   var ecpmComponent = Math.pow(Math.max(ecpmNorm || 0, 0), DISTRIBUTION_ECPM_EXPONENT);
   var rpsComponent = Math.pow(Math.max(rpsNorm || 0, 0), DISTRIBUTION_RPS_EXPONENT);
+  if (DISTRIBUTION_RPS_BONUS !== 0) {
+    var bonusScale = DISTRIBUTION_RPS_BONUS;
+    if (bonusScale > 0) {
+      rpsComponent *= 1 + (rpsComponent * bonusScale);
+    } else {
+      var penalty = Math.min(Math.abs(bonusScale), 1);
+      rpsComponent *= Math.max(0, 1 - (rpsComponent * penalty));
+    }
+  }
   return scoreComponent * ecpmComponent * rpsComponent;
 }
 
