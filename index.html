@@ -1930,6 +1930,7 @@
         google.script.run
           .withSuccessHandler(function (data) {
             showLoading(false);
+            normalizeDistributionEffectiveEcpm(data && data.distribution);
             state.analysis = data;
             var integration = data && data.integration ? data.integration : null;
             var responseFilters = data && data.filters ? data.filters : {};
@@ -3054,6 +3055,7 @@
           wrapper.appendChild(empty);
           return;
         }
+        normalizeDistributionEffectiveEcpm(distribution);
         if (distribution.requiresRouteSelection) {
           var notice = document.createElement('div');
           notice.className = 'card rounded-2xl p-6 space-y-3 text-slate-200';
@@ -3623,11 +3625,12 @@
         sortedRows.forEach(function (row) {
           var selected = state.distribution.selectedSite === row.site;
           var rowClass = selected ? 'bg-sky-900/30 text-slate-100' : '';
+          var effectiveEcpm = computeEffectiveEcpm(row);
           html += '<tr class="cursor-pointer ' + rowClass + '" data-site-select="' + escapeHtml(row.site) + '">';
           html += '<td class="px-3 py-2 font-semibold text-slate-100">' + escapeHtml(row.site) + '</td>';
           html += '<td class="px-3 py-2 text-right">' + formatCurrency(row.rps) + '</td>';
           html += '<td class="px-3 py-2 text-right">' + formatPercent(row.coverage) + '</td>';
-          html += '<td class="px-3 py-2 text-right">' + formatCurrency(row.ecpmEff) + '</td>';
+          html += '<td class="px-3 py-2 text-right">' + formatCurrency(effectiveEcpm) + '</td>';
           html += '<td class="px-3 py-2 text-right">' + formatTrend(row.momentum) + '</td>';
           html += '<td class="px-3 py-2 text-right">' + formatPercent(row.confidence * 100) + '</td>';
           html += '<td class="px-3 py-2 text-right">' + formatShare(row.currentShare) + '</td>';
@@ -3767,7 +3770,7 @@
           meta.className = 'flex flex-wrap items-center gap-2 text-xs text-slate-300';
           meta.innerHTML = '' +
             '<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-slate-900/70 border border-slate-700/60">' +
-            '<svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h4l3 8 4-16 3 8h4"/></svg>' + formatCurrency(row.ecpmEff || 0) + ' eCPM ef.</span>' +
+            '<svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h4l3 8 4-16 3 8h4"/></svg>' + formatCurrency(computeEffectiveEcpm(row) || 0) + ' eCPM ef.</span>' +
             '<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-slate-900/70 border border-slate-700/60">' +
             '<svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h4l3 8 4-16 3 8h4"/></svg>' + formatCurrency(row.rps || 0) + ' RPS</span>' +
             '<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-slate-900/70 border border-slate-700/60">' +
@@ -3907,14 +3910,15 @@
         sortedUrls.forEach(function (row) {
           var statusLower = String(row.status || '').toLowerCase();
           var statusClass = statusLower === 'alerta' ? 'bg-rose-500/10 text-rose-200 border border-rose-400/40' : statusLower === 'seed' ? 'bg-sky-500/10 text-sky-200 border border-sky-400/30' : 'bg-emerald-500/10 text-emerald-200 border border-emerald-400/30';
+          var effectiveEcpm = computeEffectiveEcpm(row);
           html += '<tr>' +
             '<td class="px-3 py-2 text-sky-300 break-all">' + escapeHtml(row.url || '') + '</td>' +
             '<td class="px-3 py-2 text-right">' + formatNumber(row.sessions) + '</td>' +
             '<td class="px-3 py-2 text-right">' + formatCurrency(row.rps) + '</td>' +
             '<td class="px-3 py-2 text-right">' + formatPercent(row.coverage) + '</td>' +
-          '<td class="px-3 py-2 text-right">' + formatCurrency(row.ecpmEff) + '</td>' +
-          '<td class="px-3 py-2 text-right">' + formatTrend(row.momentum) + '</td>' +
-          '<td class="px-3 py-2 text-right">' + formatCurrency(row.score) + '</td>' +
+          '<td class="px-3 py-2 text-right">' + formatCurrency(effectiveEcpm) + '</td>' +
+            '<td class="px-3 py-2 text-right">' + formatTrend(row.momentum) + '</td>' +
+            '<td class="px-3 py-2 text-right">' + formatCurrency(row.score) + '</td>' +
           '<td class="px-3 py-2 text-right">' + formatShare(row.performanceScore) + '</td>' +
             '<td class="px-3 py-2 text-right">' + formatShare(row.currentShare) + '</td>' +
             '<td class="px-3 py-2 text-right">' + formatShare(row.suggestedShare) + '</td>' +
@@ -3968,7 +3972,7 @@
         if (key === 'site') return (row.site || '').toLowerCase();
         if (key === 'rps') return Number(row.rps || 0);
         if (key === 'coverage') return Number(row.coverage || 0);
-        if (key === 'ecpmEff') return Number(row.ecpmEff || 0);
+        if (key === 'ecpmEff') return computeEffectiveEcpm(row);
         if (key === 'momentum') return Number(row.momentum || 0);
         if (key === 'confidence') return Number(row.confidence || 0);
         if (key === 'currentShare') return Number(row.currentShare || 0);
@@ -3999,7 +4003,7 @@
         if (key === 'sessions') return Number(row.sessions || 0);
         if (key === 'rps') return Number(row.rps || 0);
         if (key === 'coverage') return Number(row.coverage || 0);
-        if (key === 'ecpmEff') return Number(row.ecpmEff || 0);
+        if (key === 'ecpmEff') return computeEffectiveEcpm(row);
         if (key === 'momentum') return Number(row.momentum || 0);
         if (key === 'score') return Number(row.score || 0);
         if (key === 'performanceScore') return Number(row.performanceScore || 0);
@@ -4399,6 +4403,7 @@
         google.script.run
           .withSuccessHandler(function (data) {
             showLoading(false);
+            normalizeDistributionEffectiveEcpm(data && data.distribution);
             state.analysis = data;
             var responseFilters = data && data.filters ? data.filters : {};
             state.filters.startDate = responseFilters.startDate || '';
@@ -4549,6 +4554,7 @@
             state.syncingLinkRouter = false;
             showLoading(false);
             if (result && result.dashboard) {
+              normalizeDistributionEffectiveEcpm(result.dashboard && result.dashboard.distribution);
               state.analysis = result.dashboard;
               var dashFilters = result.dashboard && result.dashboard.filters ? result.dashboard.filters : {};
               state.filters.startDate = dashFilters.startDate || '';
@@ -4931,6 +4937,119 @@
         card.appendChild(table);
         attachSortHandlers(card);
         return card;
+      }
+
+      function normalizeDistributionEffectiveEcpm(distribution) {
+        if (!distribution) return;
+
+        function normalizeRow(row) {
+          if (!row) return;
+          var effective = computeEffectiveEcpm(row);
+          if (!isNaN(effective)) {
+            row.ecpmEff = effective;
+          }
+          if (row.totals) {
+            var totalsEffective = computeEffectiveEcpm(row.totals);
+            if (!isNaN(totalsEffective)) {
+              row.totals.effectiveEcpm = totalsEffective;
+            }
+          }
+        }
+
+        if (Array.isArray(distribution.sites)) {
+          distribution.sites.forEach(function (siteRow) {
+            normalizeRow(siteRow);
+            if (siteRow && Array.isArray(siteRow.urls)) {
+              siteRow.urls.forEach(normalizeRow);
+            }
+          });
+        }
+
+        var urlsBySite = distribution.urlsBySite || {};
+        Object.keys(urlsBySite).forEach(function (key) {
+          var list = urlsBySite[key];
+          if (Array.isArray(list)) {
+            list.forEach(normalizeRow);
+          }
+        });
+
+        if (distribution.globalUrls) {
+          var collections = [];
+          if (Array.isArray(distribution.globalUrls.entries)) {
+            collections.push(distribution.globalUrls.entries);
+          }
+          if (Array.isArray(distribution.globalUrls.all)) {
+            collections.push(distribution.globalUrls.all);
+          }
+          collections.forEach(function (rows) {
+            rows.forEach(normalizeRow);
+          });
+        }
+      }
+
+      function computeEffectiveEcpm(row) {
+        if (!row) return 0;
+        var ecpm = safeNumber(row.ecpm);
+        var ratio = resolveCoverageRatio(row);
+        if (!ratio && row.totals) {
+          ratio = resolveCoverageRatio(row.totals);
+        }
+        return ecpm * ratio;
+      }
+
+      function resolveCoverageRatio(source) {
+        if (!source) return 0;
+        var ratioCandidate = 0;
+        if (source.coverage != null && source.coverage !== '') {
+          ratioCandidate = safeNumber(source.coverage);
+          if (ratioCandidate > 1) {
+            ratioCandidate = ratioCandidate / 100;
+          }
+        } else if (source.coverageRatio != null && source.coverageRatio !== '') {
+          ratioCandidate = safeNumber(source.coverageRatio);
+        }
+        if (!isFinite(ratioCandidate)) {
+          ratioCandidate = 0;
+        }
+        if (ratioCandidate < 0) {
+          ratioCandidate = 0;
+        }
+        if (ratioCandidate > 1) {
+          ratioCandidate = 1;
+        }
+        if (ratioCandidate === 0 && source.coverageRatio != null && source.coverageRatio !== '') {
+          var fallback = safeNumber(source.coverageRatio);
+          if (fallback > 1) {
+            fallback = fallback / 100;
+          }
+          if (isFinite(fallback) && fallback > 0) {
+            ratioCandidate = Math.min(Math.max(fallback, 0), 1);
+          }
+        }
+        return ratioCandidate;
+      }
+
+      function safeNumber(value) {
+        if (value === null || value === undefined || value === '') return 0;
+        if (typeof value === 'number') {
+          return isFinite(value) ? value : 0;
+        }
+        if (typeof value === 'string') {
+          var trimmed = value.trim();
+          if (!trimmed) return 0;
+          var direct = Number(trimmed);
+          if (!isNaN(direct)) {
+            return direct;
+          }
+          var normalized = trimmed.replace(/\./g, '').replace(/,/g, '.');
+          var parsed = Number(normalized);
+          if (!isNaN(parsed)) {
+            return parsed;
+          }
+          return 0;
+        }
+        var converted = Number(value);
+        return isNaN(converted) ? 0 : converted;
       }
 
       function computeRpsValue(revenue, sessions) {

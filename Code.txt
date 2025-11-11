@@ -21,6 +21,10 @@ const DISTRIBUTION_COVERAGE_BONUS = 0.25;
 const DISTRIBUTION_SCORE_EXPONENT = 0.5;
 const DISTRIBUTION_ECPM_EXPONENT = 1.0;
 const DISTRIBUTION_RPS_EXPONENT = 2.5;
+const DISTRIBUTION_SITE_SCORE_WEIGHT = 0.5;
+const DISTRIBUTION_SITE_ECPM_WEIGHT = 1.0;
+const DISTRIBUTION_SITE_RPS_WEIGHT = 2.5;
+const DISTRIBUTION_RPS_BONUS = 0.35; // Ajuste rápido para amplificar a influência do RPS (0 mantém o comportamento anterior)
 const DISTRIBUTION_SOFTMAX_TAU = 0.4;
 const LINK_ROUTER_AUTO_SYNC_CROSS_DAY_WINDOW_HOURS = 4;
 
@@ -793,7 +797,7 @@ function buildUrlSummary_(rows, revshareMap) {
     if (row.isInterstitial) {
       data.sessions += row.requests;
     }
-    if (row.block && /mob_top/i.test(row.block)) {
+    if (row.block && /mob(?:ile)?_top/i.test(row.block)) {
       var blockKey = String(row.block || '').trim();
       if (!data.mobTopBlocks[blockKey]) {
         data.mobTopBlocks[blockKey] = {
@@ -941,7 +945,7 @@ function buildDetailedAnalysis_(rows, hoursInfo, revshareMap) {
       siteData.totals.sessions += row.requests;
       siteHour.sessions += row.requests;
     }
-    if (row.block && /mob_top/i.test(row.block)) {
+    if (row.block && /mob(?:ile)?_top/i.test(row.block)) {
       var coverageRatio = row.coverage > 1 ? row.coverage / 100 : row.coverage;
       var adjustedEcpm = row.ecpm * (1 - revshare);
       siteData.totals.mobTopRequests += row.requests;
@@ -980,7 +984,7 @@ function buildDetailedAnalysis_(rows, hoursInfo, revshareMap) {
       urlData.totals.sessions += row.requests;
       urlData.hours[hourKey].sessions += row.requests;
     }
-    if (row.block && /mob_top/i.test(row.block)) {
+    if (row.block && /mob(?:ile)?_top/i.test(row.block)) {
       var blockKey = String(row.block || '').trim();
       if (!urlData.hourBlocks[hourKey]) {
         urlData.hourBlocks[hourKey] = {};
@@ -1337,6 +1341,243 @@ function enforceFixedMinimumAllocations_(allocationMap, betAllocationMap, minimu
   });
 }
 
+function enforcePriorityShareCap_(allocationMap, betAllocationMap, allUrls, priorityKeys, targetShare, fixedMinimumMap, options) {
+  if (!priorityKeys) {
+    return;
+  }
+  var cap = targetShare != null ? Math.max(0, Math.min(1, targetShare)) : 0;
+  var EPSILON = 1e-9;
+  var priorityItems = [];
+  var totalShare = 0;
+  var floorTotal = 0;
+  var flexibleTotal = 0;
+  allUrls.forEach(function (row) {
+    if (!priorityKeys[row.key]) {
+      return;
+    }
+    var current = Math.max(0, allocationMap[row.key] || 0);
+    var floor = 0;
+    if (fixedMinimumMap && fixedMinimumMap[row.key] != null) {
+      floor = Math.max(0, fixedMinimumMap[row.key] || 0);
+      if (floor > current) {
+        floor = current;
+      }
+    }
+    var flexible = Math.max(0, current - floor);
+    var weight = Math.max(0, row.distributionWeight || row.performanceScore || 0);
+    priorityItems.push({
+      key: row.key,
+      row: row,
+      current: current,
+      floor: floor,
+      flexible: flexible,
+      weight: weight,
+      initial: current
+    });
+    totalShare += current;
+    floorTotal += floor;
+    flexibleTotal += flexible;
+  });
+  if (!priorityItems.length) {
+    return;
+  }
+
+  var totalReduction = 0;
+  if (totalShare > cap + EPSILON) {
+    var desiredFlexible = Math.max(0, cap - floorTotal);
+    if (desiredFlexible < 0) {
+      desiredFlexible = 0;
+    }
+    if (desiredFlexible > flexibleTotal) {
+      desiredFlexible = flexibleTotal;
+    }
+    var scale = flexibleTotal > EPSILON ? (desiredFlexible / flexibleTotal) : 0;
+    if (!isFinite(scale) || scale < 0) {
+      scale = 0;
+    }
+    priorityItems.forEach(function (item) {
+      var newFlexible = item.flexible * scale;
+      var nextShare = item.floor + newFlexible;
+      if (nextShare < item.floor) {
+        nextShare = item.floor;
+      }
+      var reduction = item.current - nextShare;
+      if (reduction < 0) {
+        reduction = 0;
+      }
+      totalReduction += reduction;
+      allocationMap[item.key] = nextShare;
+      if (betAllocationMap && betAllocationMap[item.key]) {
+        var betShare = betAllocationMap[item.key];
+        if (item.current > 0) {
+          betShare = betShare * (nextShare / item.current);
+        }
+        if (betShare > nextShare) {
+          betShare = nextShare;
+        }
+        betAllocationMap[item.key] = betShare;
+      }
+      item.current = nextShare;
+    });
+  }
+
+  options = options || {};
+  if (totalReduction > EPSILON) {
+    var allowAll = !!options.guaranteeAll;
+    var activeKeys = options.activeKeys || {};
+    var betKeys = options.betKeys || {};
+    var recipients = [];
+    var weightSum = 0;
+    allUrls.forEach(function (row) {
+      if (priorityKeys[row.key]) {
+        return;
+      }
+      var eligible = allowAll || !!activeKeys[row.key] || !!betKeys[row.key] || (allocationMap[row.key] || 0) > 0;
+      if (!eligible) {
+        return;
+      }
+      var weight = Math.max(0, row.distributionWeight || row.performanceScore || 0);
+      recipients.push({ key: row.key, weight: weight });
+      weightSum += weight;
+    });
+    if (!recipients.length) {
+      priorityItems.forEach(function (item) {
+        allocationMap[item.key] = item.initial;
+        if (betAllocationMap && betAllocationMap[item.key]) {
+          var betShare = betAllocationMap[item.key];
+          if (betShare > item.initial) {
+            betShare = item.initial;
+          }
+          betAllocationMap[item.key] = betShare;
+        }
+        item.current = item.initial;
+      });
+      totalReduction = 0;
+    } else {
+      var distributed = 0;
+      recipients.forEach(function (recipient, index) {
+        var portion;
+        if (weightSum > EPSILON) {
+          portion = totalReduction * (recipient.weight / weightSum);
+        } else {
+          portion = totalReduction / recipients.length;
+        }
+        if (index === recipients.length - 1) {
+          portion = totalReduction - distributed;
+        } else {
+          distributed += portion;
+        }
+        allocationMap[recipient.key] = (allocationMap[recipient.key] || 0) + portion;
+      });
+    }
+  }
+
+  var updatedTotal = 0;
+  priorityItems.forEach(function (item) {
+    item.current = Math.max(0, allocationMap[item.key] || 0);
+    updatedTotal += item.current;
+  });
+
+  if (cap > updatedTotal + EPSILON) {
+    var donorItems = [];
+    var donorTotal = 0;
+    allUrls.forEach(function (row) {
+      if (priorityKeys[row.key]) {
+        return;
+      }
+      var current = Math.max(0, allocationMap[row.key] || 0);
+      if (current <= 0) {
+        return;
+      }
+      var floor = 0;
+      if (fixedMinimumMap && fixedMinimumMap[row.key] != null) {
+        floor = Math.max(0, fixedMinimumMap[row.key] || 0);
+        if (floor > current) {
+          floor = current;
+        }
+      }
+      var available = Math.max(0, current - floor);
+      if (available <= EPSILON) {
+        return;
+      }
+      donorItems.push({
+        key: row.key,
+        current: current,
+        floor: floor,
+        available: available
+      });
+      donorTotal += available;
+    });
+
+    var potential = Math.min(cap, updatedTotal + donorTotal);
+    var needed = Math.max(0, potential - updatedTotal);
+    if (needed > EPSILON && donorTotal > EPSILON) {
+      var totalIncrease = 0;
+      var donorDistributed = 0;
+      donorItems.forEach(function (item, index) {
+        var reduction = needed * (item.available / donorTotal);
+        if (reduction > item.available) {
+          reduction = item.available;
+        }
+        if (index === donorItems.length - 1) {
+          var remaining = needed - donorDistributed;
+          if (remaining < 0) {
+            remaining = 0;
+          }
+          reduction = Math.min(item.available, remaining);
+        } else {
+          donorDistributed += reduction;
+        }
+        if (reduction < 0) {
+          reduction = 0;
+        }
+        var nextShare = Math.max(item.floor, item.current - reduction);
+        if (nextShare < item.floor) {
+          nextShare = item.floor;
+        }
+        totalIncrease += item.current - nextShare;
+        allocationMap[item.key] = nextShare;
+        if (betAllocationMap && betAllocationMap[item.key]) {
+          var betShare = betAllocationMap[item.key];
+          if (betShare > nextShare) {
+            betShare = nextShare;
+          } else if (item.current > 0) {
+            betShare = betShare * (nextShare / item.current);
+          }
+          betAllocationMap[item.key] = betShare;
+        }
+      });
+
+      if (totalIncrease > EPSILON) {
+        var weightSum = 0;
+        priorityItems.forEach(function (item) {
+          weightSum += item.weight;
+        });
+        var added = 0;
+        priorityItems.forEach(function (item, index) {
+          var addition;
+          if (weightSum > EPSILON) {
+            addition = totalIncrease * (item.weight / weightSum);
+          } else {
+            addition = totalIncrease / priorityItems.length;
+          }
+          if (index === priorityItems.length - 1) {
+            addition = totalIncrease - added;
+          } else {
+            added += addition;
+          }
+          if (addition < 0) {
+            addition = 0;
+          }
+          var nextShare = (allocationMap[item.key] || 0) + addition;
+          allocationMap[item.key] = nextShare;
+          item.current = nextShare;
+        });
+      }
+    }
+  }
+}
+
 function normalizeAllocationWithMinimums_(allocationMap, betAllocationMap, minimumMap) {
   var keys = Object.keys(allocationMap);
   var total = keys.reduce(function (acc, key) {
@@ -1530,7 +1771,7 @@ function buildDistributionPlan_(rows, hoursInfo, revshareMap, params) {
     if (row.isInterstitial) {
       urlData.hours[row.timestamp].sessions += row.requests;
     }
-    if (row.block && /mob_top/i.test(row.block)) {
+    if (row.block && /mob(?:ile)?_top/i.test(row.block)) {
       var blockKey = String(row.block || '').trim();
       if (!urlData.mobTopBlocks[blockKey]) {
         urlData.mobTopBlocks[blockKey] = {
@@ -1722,6 +1963,26 @@ function buildDistributionPlan_(rows, hoursInfo, revshareMap, params) {
     });
     var siteScores = urls.map(function (entry) { return entry.score || 0; }).filter(function (value) { return value > 0; });
     siteRow.score = siteScores.length ? average_(siteScores) : 0;
+  });
+
+  var siteMaxScore = 0;
+  var siteMaxEcpmEff = 0;
+  var siteMaxRps = 0;
+  siteRows.forEach(function (siteRow) {
+    if (siteRow.score > siteMaxScore) siteMaxScore = siteRow.score;
+    if (siteRow.ecpmEff > siteMaxEcpmEff) siteMaxEcpmEff = siteRow.ecpmEff;
+    if (siteRow.rps > siteMaxRps) siteMaxRps = siteRow.rps;
+  });
+
+  siteRows.forEach(function (siteRow) {
+    siteRow.normalizedScore = siteMaxScore > 0 ? clamp_(siteRow.score / siteMaxScore, 0, 1) : 0;
+    siteRow.normalizedEcpmEff = siteMaxEcpmEff > 0 ? clamp_(siteRow.ecpmEff / siteMaxEcpmEff, 0, 1) : 0;
+    siteRow.normalizedRps = siteMaxRps > 0 ? clamp_(siteRow.rps / siteMaxRps, 0, 1) : 0;
+    siteRow.performanceComposite = computeSiteCompositeScore_(
+      siteRow.normalizedScore,
+      siteRow.normalizedEcpmEff,
+      siteRow.normalizedRps
+    );
   });
 
   var allUrls = [];
@@ -2098,6 +2359,27 @@ function buildDistributionPlan_(rows, hoursInfo, revshareMap, params) {
   }
   enforceFixedMinimumAllocations_(allocationMap, betAllocationMap, fixedMinimumMap);
   normalizeAllocationWithMinimums_(allocationMap, betAllocationMap, fixedMinimumMap);
+
+  var siteTargetShareMap = computeSiteTargetShareMap_(siteRows, allUrls, allocationMap);
+  if (siteTargetShareMap) {
+    rebalanceAllocationMapBySiteTargets_(allocationMap, betAllocationMap, allUrls, siteTargetShareMap, {
+      activeKeys: activeKeys,
+      betKeys: betTargetKeys,
+      guaranteeAll: guaranteeAll
+    });
+    siteRows.forEach(function (siteRow) {
+      siteRow.targetShare = siteTargetShareMap.hasOwnProperty(siteRow.site) ? siteTargetShareMap[siteRow.site] : 0;
+    });
+  }
+
+  enforcePriorityShareCap_(allocationMap, betAllocationMap, allUrls, priorityKeys, targetPriorityTotal, fixedMinimumMap, {
+    activeKeys: activeKeys,
+    betKeys: betTargetKeys,
+    guaranteeAll: guaranteeAll
+  });
+
+  normalizeAllocationWithMinimums_(allocationMap, betAllocationMap, fixedMinimumMap);
+
   fixedMinimumShare = 0;
   Object.keys(fixedMinimumMap).forEach(function (key) {
     var target = Math.max(0, fixedMinimumMap[key] || 0);
@@ -3352,7 +3634,265 @@ function computeDistributionCompositeScore_(scoreNorm, ecpmNorm, rpsNorm) {
   var scoreComponent = Math.pow(Math.max(scoreNorm || 0, 0), DISTRIBUTION_SCORE_EXPONENT);
   var ecpmComponent = Math.pow(Math.max(ecpmNorm || 0, 0), DISTRIBUTION_ECPM_EXPONENT);
   var rpsComponent = Math.pow(Math.max(rpsNorm || 0, 0), DISTRIBUTION_RPS_EXPONENT);
+  if (DISTRIBUTION_RPS_BONUS !== 0) {
+    var bonusScale = DISTRIBUTION_RPS_BONUS;
+    if (bonusScale > 0) {
+      rpsComponent *= 1 + (rpsComponent * bonusScale);
+    } else {
+      var penalty = Math.min(Math.abs(bonusScale), 1);
+      rpsComponent *= Math.max(0, 1 - (rpsComponent * penalty));
+    }
+  }
   return scoreComponent * ecpmComponent * rpsComponent;
+}
+
+function computeSiteCompositeScore_(scoreNorm, ecpmNorm, rpsNorm) {
+  var scoreComponent = Math.pow(Math.max(scoreNorm || 0, 0), DISTRIBUTION_SITE_SCORE_WEIGHT);
+  var ecpmComponent = Math.pow(Math.max(ecpmNorm || 0, 0), DISTRIBUTION_SITE_ECPM_WEIGHT);
+  var rpsComponent = Math.pow(Math.max(rpsNorm || 0, 0), DISTRIBUTION_SITE_RPS_WEIGHT);
+  return scoreComponent * ecpmComponent * rpsComponent;
+}
+
+function computeSiteTargetShareMap_(siteRows, allUrls, allocationMap) {
+  if (!siteRows || !siteRows.length) {
+    return null;
+  }
+  var siteFloors = {};
+  allUrls.forEach(function (row) {
+    var siteKey = row.site;
+    if (!siteFloors.hasOwnProperty(siteKey)) {
+      siteFloors[siteKey] = 0;
+    }
+    siteFloors[siteKey] += Math.max(0, row.fixedMinimumShare || 0);
+  });
+
+  var siteWeights = {};
+  var weightTotal = 0;
+  siteRows.forEach(function (siteRow) {
+    var weight = Math.max(0, siteRow.performanceComposite || 0);
+    siteWeights[siteRow.site] = weight;
+    weightTotal += weight;
+  });
+
+  var siteKeys = siteRows.map(function (row) { return row.site; });
+  var totalFloor = 0;
+  siteKeys.forEach(function (siteKey) {
+    var floor = Math.max(0, siteFloors[siteKey] || 0);
+    siteFloors[siteKey] = floor;
+    totalFloor += floor;
+  });
+
+  var targetShares = {};
+  if (totalFloor >= 1 - 1e-9) {
+    if (totalFloor <= 0) {
+      return null;
+    }
+    var floorScale = 1 / totalFloor;
+    siteKeys.forEach(function (siteKey) {
+      var floor = siteFloors[siteKey] || 0;
+      targetShares[siteKey] = floor > 0 ? floor * floorScale : 0;
+    });
+    return targetShares;
+  }
+
+  var leftover = 1 - totalFloor;
+  if (leftover < 0) {
+    leftover = 0;
+  }
+
+  if (weightTotal > 0) {
+    var assigned = 0;
+    siteKeys.forEach(function (siteKey, index) {
+      var weight = Math.max(0, siteWeights[siteKey] || 0);
+      var share = 0;
+      if (index === siteKeys.length - 1) {
+        share = Math.max(0, leftover - assigned);
+      } else if (weightTotal > 0) {
+        share = leftover * (weight / weightTotal);
+        assigned += share;
+      }
+      targetShares[siteKey] = share;
+    });
+  } else {
+    var currentTotals = {};
+    var currentSum = 0;
+    allUrls.forEach(function (row) {
+      var share = Math.max(0, allocationMap[row.key] || 0);
+      currentTotals[row.site] = (currentTotals[row.site] || 0) + share;
+      currentSum += share;
+    });
+    var distributed = 0;
+    siteKeys.forEach(function (siteKey, index) {
+      var share = 0;
+      if (currentSum > 0) {
+        if (index === siteKeys.length - 1) {
+          share = Math.max(0, leftover - distributed);
+        } else {
+          share = leftover * ((currentTotals[siteKey] || 0) / currentSum);
+          distributed += share;
+        }
+      } else if (siteKeys.length > 0) {
+        share = leftover / siteKeys.length;
+      }
+      targetShares[siteKey] = share;
+    });
+  }
+
+  siteKeys.forEach(function (siteKey) {
+    targetShares[siteKey] = (targetShares[siteKey] || 0) + (siteFloors[siteKey] || 0);
+  });
+
+  return targetShares;
+}
+
+function rebalanceAllocationMapBySiteTargets_(allocationMap, betAllocationMap, allUrls, targetShares, options) {
+  if (!targetShares) {
+    return;
+  }
+  options = options || {};
+  var allowAll = !!options.guaranteeAll;
+  var activeKeys = options.activeKeys || {};
+  var betKeys = options.betKeys || {};
+  var urlsBySite = {};
+  allUrls.forEach(function (row) {
+    if (!urlsBySite[row.site]) {
+      urlsBySite[row.site] = [];
+    }
+    urlsBySite[row.site].push(row);
+  });
+
+  Object.keys(urlsBySite).forEach(function (siteKey) {
+    var urls = urlsBySite[siteKey];
+    var target = Math.max(0, targetShares.hasOwnProperty(siteKey) ? targetShares[siteKey] : 0);
+    if (!urls.length) {
+      return;
+    }
+    var siteFloor = 0;
+    var siteFlexible = 0;
+    var items = urls.map(function (row) {
+      var key = row.key;
+      var current = Math.max(0, allocationMap[key] || 0);
+      var floor = Math.max(0, row.fixedMinimumShare || 0);
+      var eligibleFlexible = allowAll || !!activeKeys[key] || !!betKeys[key];
+      var flexible = eligibleFlexible ? Math.max(0, current - floor) : 0;
+      siteFloor += floor;
+      siteFlexible += flexible;
+      return {
+        row: row,
+        key: key,
+        floor: floor,
+        current: current,
+        flexible: flexible,
+        eligibleFlexible: eligibleFlexible
+      };
+    });
+
+    if (target < siteFloor) {
+      target = siteFloor;
+    }
+    var targetFlexible = Math.max(0, target - siteFloor);
+
+    var weightSum = 0;
+    if (siteFlexible <= 0 && targetFlexible > 0) {
+      items.forEach(function (item) {
+        if (!item.eligibleFlexible) {
+          item.weight = 0;
+          return;
+        }
+        var weight = Math.max(0, item.row.distributionWeight || item.row.performanceScore || 0);
+        item.weight = weight;
+        weightSum += weight;
+      });
+    }
+
+    var eligibleItems = items.filter(function (item) { return item.eligibleFlexible; });
+
+    items.forEach(function (item, index) {
+      var newShare;
+      if (siteFlexible > 0) {
+        var scale = siteFlexible > 0 ? targetFlexible / siteFlexible : 0;
+        var adjusted = item.flexible * scale;
+        newShare = item.floor + adjusted;
+      } else if (targetFlexible > 0) {
+        if (item.eligibleFlexible && eligibleItems.length) {
+          var weightPortion;
+          if (weightSum > 0) {
+            weightPortion = targetFlexible * (item.weight / weightSum);
+          } else {
+            weightPortion = targetFlexible / eligibleItems.length;
+          }
+          if (index === items.length - 1) {
+            var assigned = 0;
+            items.slice(0, index).forEach(function (prev) {
+              assigned += Math.max(0, prev.nextShare != null ? prev.nextShare - prev.floor : 0);
+            });
+            weightPortion = Math.max(0, targetFlexible - assigned);
+          }
+          newShare = item.floor + weightPortion;
+        } else {
+          newShare = item.floor;
+        }
+      } else {
+        newShare = item.floor;
+      }
+      if (newShare < item.floor) {
+        newShare = item.floor;
+      }
+      item.nextShare = newShare;
+    });
+
+    items.forEach(function (item) {
+      var key = item.key;
+      var previous = item.current;
+      var nextValue = Math.max(0, item.nextShare != null ? item.nextShare : item.floor);
+      allocationMap[key] = nextValue;
+      if (betAllocationMap && betAllocationMap[key]) {
+        var betShare = betAllocationMap[key];
+        if (previous > 0) {
+          betShare = betShare * (nextValue / previous);
+        }
+        if (betShare > nextValue) {
+          betShare = nextValue;
+        }
+        betAllocationMap[key] = betShare;
+      }
+    });
+  });
+
+  var total = 0;
+  var maxKey = null;
+  var maxShare = -1;
+  allUrls.forEach(function (row) {
+    var share = Math.max(0, allocationMap[row.key] || 0);
+    total += share;
+    if (share > maxShare) {
+      maxShare = share;
+      maxKey = row.key;
+    }
+  });
+  if (Math.abs(total - 1) > 1e-6 && maxKey != null) {
+    var diff = 1 - total;
+    var current = Math.max(0, allocationMap[maxKey] || 0);
+    var rowFloor = 0;
+    for (var i = 0; i < allUrls.length; i++) {
+      if (allUrls[i].key === maxKey) {
+        rowFloor = Math.max(0, allUrls[i].fixedMinimumShare || 0);
+        break;
+      }
+    }
+    var adjusted = Math.max(rowFloor, current + diff);
+    allocationMap[maxKey] = adjusted;
+    if (betAllocationMap && betAllocationMap[maxKey]) {
+      var betValue = betAllocationMap[maxKey];
+      if (current > 0) {
+        betValue = betValue * (adjusted / current);
+      }
+      if (betValue > adjusted) {
+        betValue = adjusted;
+      }
+      betAllocationMap[maxKey] = betValue;
+    }
+  }
 }
 
 function startOfDay_(date) {
