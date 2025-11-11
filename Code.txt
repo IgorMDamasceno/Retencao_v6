@@ -793,7 +793,7 @@ function buildUrlSummary_(rows, revshareMap) {
     if (row.isInterstitial) {
       data.sessions += row.requests;
     }
-    if (row.block && /mob_top/i.test(row.block)) {
+    if (row.block && /mob(?:ile)?_top/i.test(row.block)) {
       var blockKey = String(row.block || '').trim();
       if (!data.mobTopBlocks[blockKey]) {
         data.mobTopBlocks[blockKey] = {
@@ -941,7 +941,7 @@ function buildDetailedAnalysis_(rows, hoursInfo, revshareMap) {
       siteData.totals.sessions += row.requests;
       siteHour.sessions += row.requests;
     }
-    if (row.block && /mob_top/i.test(row.block)) {
+    if (row.block && /mob(?:ile)?_top/i.test(row.block)) {
       var coverageRatio = row.coverage > 1 ? row.coverage / 100 : row.coverage;
       var adjustedEcpm = row.ecpm * (1 - revshare);
       siteData.totals.mobTopRequests += row.requests;
@@ -980,7 +980,7 @@ function buildDetailedAnalysis_(rows, hoursInfo, revshareMap) {
       urlData.totals.sessions += row.requests;
       urlData.hours[hourKey].sessions += row.requests;
     }
-    if (row.block && /mob_top/i.test(row.block)) {
+    if (row.block && /mob(?:ile)?_top/i.test(row.block)) {
       var blockKey = String(row.block || '').trim();
       if (!urlData.hourBlocks[hourKey]) {
         urlData.hourBlocks[hourKey] = {};
@@ -1530,7 +1530,7 @@ function buildDistributionPlan_(rows, hoursInfo, revshareMap, params) {
     if (row.isInterstitial) {
       urlData.hours[row.timestamp].sessions += row.requests;
     }
-    if (row.block && /mob_top/i.test(row.block)) {
+    if (row.block && /mob(?:ile)?_top/i.test(row.block)) {
       var blockKey = String(row.block || '').trim();
       if (!urlData.mobTopBlocks[blockKey]) {
         urlData.mobTopBlocks[blockKey] = {
